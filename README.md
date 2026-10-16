@@ -39,7 +39,7 @@ Remember the ladder, not the digits: **RAM is ns, SSD is µs, network is ms, ano
 | RAM access | 100 ns |
 | SSD random read | 100 µs |
 | Round trip in the same datacenter | 0.5 ms |
-| Redis read over the network | ~1 ms |
+| Redis read over the network | ~0.2–1 ms (mostly the round trip) |
 | Simple indexed DB query | 1–10 ms |
 | HDD seek | 10 ms |
 | Round trip, same continent | 50 ms |
@@ -56,7 +56,7 @@ If the critical path has a disk seek or a cross-continent call in it, that is th
 | App server, very simple/optimized endpoint | 10k–50k RPS |
 | Static content / proxy | 50k+ RPS |
 | Heavy CPU work, or several downstream calls | 100s–1k RPS |
-| Postgres/MySQL, simple indexed reads | **~10k QPS** (5k–50k) |
+| Postgres/MySQL, simple indexed reads | **~10k QPS** (5k–50k; 100k+ on a big box with the working set in RAM) |
 | Postgres/MySQL, writes / transactions | **~1k–10k/s** |
 | Postgres/MySQL, heavy joins or aggregation | 100s–1k QPS |
 | Redis | **~100k ops/s** |
@@ -71,7 +71,8 @@ If the critical path has a disk seek or a cross-continent call in it, that is th
 | HDD sequential | 100–200 MB/s |
 | SATA SSD sequential | 500 MB/s |
 | NVMe SSD sequential | 1–7 GB/s |
-| NVMe random IOPS | 100k+ |
+| Local NVMe random IOPS | 100k–1M |
+| Cloud network volume (e.g. EBS gp3) | 3k IOPS baseline, ~1 ms per I/O |
 | Server RAM | 64–256 GB is a normal big box |
 
 ### Data sizes
@@ -80,16 +81,17 @@ If the critical path has a disk seek or a cross-continent call in it, that is th
 |---|---|
 | Tweet-sized text | 300 B |
 | Small JSON object / DB row with a few columns | 1 KB |
-| Web image (JPEG) | 200 KB |
+| Feed-sized photo, ~1080 px (JPEG/WebP) | 200 KB |
+| Thumbnail / typical small web image | 10–20 KB |
 | Phone photo | 2–5 MB |
 | 1 minute of MP3 | 1 MB |
-| 1 minute of HD video | 50–100 MB |
+| 1 minute of HD video | 50–100 MB stored; ~30 MB streamed |
 
 ## Formulas
 
 ```
 QPS_avg       = DAU × actions_per_user / 100,000
-QPS_peak      = QPS_avg × 2..5
+QPS_peak      = QPS_avg × 2..5   (10 if spiky)
 Storage/year  = writes_per_day × size × 365 × replicas (×1.3 for indexes and overhead)
 Bandwidth     = QPS × response_size
 Servers       = QPS_peak / per_server_capacity   (then add ~50% headroom)
@@ -112,22 +114,16 @@ Assume 100M DAU. Each user views 50 photos and 1 in 10 users uploads one photo a
 
 - **Reads:** 100M × 50 = 5B/day ÷ 100k ≈ **50k QPS**, peak ~150k.
 - **Writes:** 10M/day ÷ 100k ≈ **100 QPS**, peak ~300. Writes are easy.
-- **Photo storage:** 10M × 2 MB = 20 TB/day → ~7 PB/year, ~20 PB with 3 replicas. Object storage, not a database.
-- **Metadata:** 10M rows × 1 KB = 10 GB/day → ~4 TB/year. One Postgres primary handles 300 writes/s; plan to shard or archive within a year or two.
-- **Egress:** 150k × 200 KB ≈ 30 GB/s at peak. That is ~300 servers' worth of 1 Gbps links, so it goes on a CDN.
-- **App servers** (if the CDN didn't exist): 150k / 5k = 30, call it 50 with headroom.
+- **Photo storage:** 10M × 2 MB = 20 TB/day → ~7 PB/year (~20 PB physical if you replicate 3× yourself; S3/GCS bill the logical 7 PB). Object storage, not a database.
+- **Metadata:** 10M rows × 1 KB = 10 GB/day → ~4 TB/year raw, ~15 TB with replicas and indexes. One Postgres primary handles 300 writes/s; plan to shard or archive within a year or two.
+- **Egress:** viewers get a ~200 KB resized copy, not the 2 MB original: 150k × 200 KB ≈ 30 GB/s at peak. That is ~300 servers' worth of 1 Gbps links, so it goes on a CDN.
+- **App servers** (if the CDN didn't exist): 150k / 5k = 30 by CPU, call it 50 with headroom. But 30 GB/s of egress needs ~300 × 1 Gbps (or ~30–50 × 10 Gbps) NICs, so bandwidth, not CPU, sets the count.
 
 Conclusion to say out loud: compute is cheap here; **storage and egress bandwidth drive the design**, so object storage + CDN + presigned uploads, and a cache in front of the metadata DB.
 
 ## Resources
 
-- **HLD Supplementary: Back-of-the-Envelope Estimation Guide** — [dip4k/DSA_102](https://github.com/dip4k/DSA_102). Key numbers, QPS/storage/bandwidth patterns, server count.
-- **Capacity Estimation** — [blakelassiter/data-engineering-interview-patterns](https://github.com/blakelassiter/data-engineering-interview-patterns). Latency, throughput, storage and cost tables.
-- **Numbers Every Engineer Should Know** — [nimin1/system-design-vibecoding](https://github.com/nimin1/system-design-vibecoding). Short cheat sheet of latencies and conversions.
-- **Requirements & Back-of-Envelope Estimation** — [bindian0509/system-design](https://github.com/bindian0509/system-design). Formulas and templates.
-- **Back-of-the-envelope Calculations** — [Devparihar5/A-Complete-Guide-For-System-Designing](https://github.com/Devparihar5/A-Complete-Guide-For-System-Designing). Latency, throughput and common scenarios.
-- **Numbers Every Engineer Must Know** — [Ali-Meh619/System_Design_ML_Principles](https://github.com/Ali-Meh619/System_Design_ML_Principles). The speed hierarchy and scale reference points.
-- **Interview Byte: Make the Numbers Earn Their Place** — KodeKloud. How to say assumptions out loud and round during an interview.
-- **SystemForces: Back-of-the-Envelope Estimation**. QPS, storage, bandwidth and memory, framed for interviews; aims for ±2×, not precision.
-- **System Design Prep: Back-of-the-Envelope Estimation**. The exact number isn't the point; finding what is under pressure is.
-- **Latency Numbers Every Programmer Should Know** — Jeff Dean's original list, as published in Peter Norvig's [Teach Yourself Programming in Ten Years](https://norvig.com/21-days.html#answers).
+- **Latency Numbers Every Programmer Should Know** — Peter Norvig's timing table in [Teach Yourself Programming in Ten Years](https://norvig.com/21-days.html#answers), later extended and popularized by Jeff Dean ([gist](https://gist.github.com/jboner/2841832)).
+- **Interactive latency numbers** — [Colin Scott](https://colin-scott.github.io/personal_website/research/interactive_latency.html), adjusted by year; also [samwho's visualization](https://samwho.dev/numbers).
+- **System Design Primer** — [Powers of two](https://github.com/donnemartin/system-design-primer#powers-of-two-table) and [latency numbers](https://github.com/donnemartin/system-design-primer#latency-numbers-every-programmer-should-know) tables.
+- **Napkin Math** — [sirupsen/napkin-math](https://github.com/sirupsen/napkin-math). First-principles numbers and techniques for estimating system performance.
